@@ -66,7 +66,7 @@ See docs/README.md for common issues and solutions.
 ## Compatibility
 
 Tested on:
-- Fedora 42 + KDE Plasma 6 + Wayland
+- Arch + KDE Plasma 6 + Wayland
 - SPICE/QXL virtualization
 - QEMU/KVM
 
