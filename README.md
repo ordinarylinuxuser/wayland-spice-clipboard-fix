@@ -27,7 +27,7 @@ cd wayland-spice-clipboard-fix
 
 ## Requirements
 
-- Fedora with Wayland
+- Arch with Wayland
 - SPICE virtualization
 - KDE Plasma (tested with Plasma 6)
 
