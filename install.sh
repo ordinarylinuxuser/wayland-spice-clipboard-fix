@@ -21,16 +21,27 @@ sudo chmod +x /usr/local/bin/wayland-spice-clipboard
 
 echo "Setting up service..."
 mkdir -p ~/.config/systemd/user
+# Drop any enable symlink from a previous install (the unit used to be
+# WantedBy=default.target; it is now WantedBy=graphical-session.target).
+systemctl --user disable --now wayland-spice-clipboard.service 2>/dev/null || true
 cp systemd/wayland-spice-clipboard.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable wayland-spice-clipboard.service
-systemctl --user start wayland-spice-clipboard.service
+systemctl --user enable --now wayland-spice-clipboard.service
 
 echo "Setting up spice agent..."
-./scripts/setup-spice-autostart.sh
+if [ -f /usr/lib/systemd/user/spice-vdagent.service ]; then
+    # The distro package already starts spice-vdagent -x as part of
+    # graphical-session.target. A second copy via XDG autostart would fight
+    # over the same vdagentd socket, so make sure none is left behind.
+    echo "Distro provides spice-vdagent.service user unit; skipping XDG autostart entry"
+    rm -f ~/.config/autostart/spice-vdagent-manual.desktop
+else
+    ./scripts/setup-spice-autostart.sh
+fi
 
-sudo systemctl enable spice-vdagentd
-sudo systemctl start spice-vdagentd
+# spice-vdagentd is a static unit pulled in by udev/socket activation; just
+# make sure it is running now.
+sudo systemctl start spice-vdagentd.socket spice-vdagentd
 
 echo "Installation complete!"
 echo "Check status: systemctl --user status wayland-spice-clipboard.service"

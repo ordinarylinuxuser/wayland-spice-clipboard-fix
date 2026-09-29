@@ -1,0 +1,25 @@
+---
+description: Push only to the ordinarylinuxuser fork, never to the upstream chrisbelson repo
+alwaysApply: true
+---
+
+# Git remotes
+
+This checkout is a fork. Pushes, pull requests, and merges stay on the fork.
+
+- `origin`: `https://github.com/ordinarylinuxuser/wayland-spice-clipboard-fix.git` — the only push target
+- `upstream`: `https://github.com/chrisbelson/wayland-spice-clipboard-fix.git` — fetch only
+
+Never push to `upstream` or to `chrisbelson/wayland-spice-clipboard-fix`. Do not open or merge pull requests against that repository.
+
+```bash
+git fetch upstream
+git push -u origin HEAD
+gh pr create --repo ordinarylinuxuser/wayland-spice-clipboard-fix
+```
+
+```bash
+# wrong: writes to the original repo
+git push upstream HEAD
+git push origin HEAD   # only if origin still points at chrisbelson
+```
