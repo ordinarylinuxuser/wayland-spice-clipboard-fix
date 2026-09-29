@@ -1,60 +1,90 @@
 #!/bin/bash
+#
+# Wayland -> X11 clipboard bridge so spice-vdagent (running in X11 mode
+# against Xwayland) sees clipboard changes made by native Wayland apps.
+#
+# Environment is normally inherited from the systemd user manager, which the
+# desktop session populates once the compositor is up. Values below are only
+# fallbacks for running the script by hand.
 
-export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-export WAYLAND_DISPLAY="wayland-0"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+export DISPLAY="${DISPLAY:-:0}"
 
-# Detect X11 Display where spice-vdagent is connected to
-if [ -n "$DISPLAY" ]; then
-    X11_DISPLAY="$DISPLAY"
-else
-    # Find which display has an active X11 session
-    for display in :0 :1 :2 :10; do
-        if xset -display $display q >/dev/null 2>&1; then
-            X11_DISPLAY="$display"
+# Xwayland under KWin uses a per-boot auth file in XDG_RUNTIME_DIR. Without it
+# xclip fails with "Authorization required, but no authorization protocol
+# specified".
+if [ -z "$XAUTHORITY" ]; then
+    for candidate in "$XDG_RUNTIME_DIR"/xauth_* "$HOME/.Xauthority"; do
+        if [ -r "$candidate" ]; then
+            export XAUTHORITY="$candidate"
             break
         fi
     done
-    
-    # Fallback to socket detection if xset failed
-    if [ -z "$X11_DISPLAY" ]; then
-        if [ -S "/tmp/.X11-unix/X1" ]; then
-            X11_DISPLAY=":1"
-        elif [ -S "/tmp/.X11-unix/X0" ]; then
-            X11_DISPLAY=":0"
-        else
-            X11_DISPLAY=":0"
-        fi
-    fi
 fi
 
-export DISPLAY="$X11_DISPLAY"
+READY_TIMEOUT=30      # seconds to wait for the X server before giving up
+MAX_SYNC_FAILURES=5   # consecutive xclip failures before exiting for a restart
 
-echo "Starting clipboard bridge"
-echo "Using display: $DISPLAY"
+log() {
+    echo "$*"
+}
 
-# Verify that we can connect and clipboard works
-if ! xclip -version >/dev/null 2>&1; then
-    echo "Warning: Cannot connect to X11 display $DISPLAY"
-    # Try to find a working display
-    for test_display in :0 :1 :2 :10; do
-        if DISPLAY=$test_display xclip -version >/dev/null 2>&1; then
-            export DISPLAY="$test_display"
-            echo "Switched to display: $DISPLAY"
-            break
-        fi
-    done
+# Returns 0 when xclip can open the display. xclip exits non-zero for an empty
+# clipboard too, so only treat a display-open failure as "not ready".
+x_display_ready() {
+    local err
+    err=$(xclip -selection clipboard -o 2>&1 >/dev/null)
+    ! grep -qiE "can't open display|authorization required|connection refused" <<<"$err"
+}
+
+log "Starting clipboard bridge"
+log "Using DISPLAY=$DISPLAY WAYLAND_DISPLAY=$WAYLAND_DISPLAY XAUTHORITY=${XAUTHORITY:-<unset>}"
+
+# ":0" or ":0.0" -> "/tmp/.X11-unix/X0"
+display_num="${DISPLAY#:}"
+display_num="${display_num%%.*}"
+x_socket="/tmp/.X11-unix/X${display_num}"
+waited=0
+until [ -S "$x_socket" ] && x_display_ready; do
+    if [ "$waited" -ge "$READY_TIMEOUT" ]; then
+        log "Error: X display $DISPLAY not reachable after ${READY_TIMEOUT}s (socket: $x_socket, XAUTHORITY: ${XAUTHORITY:-<unset>})"
+        exit 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+done
+
+if ! wl-paste --list-types >/dev/null 2>&1; then
+    log "Warning: cannot reach Wayland display $WAYLAND_DISPLAY yet; will keep polling"
 fi
 
 last_clipboard=""
+failures=0
+
+# xclip -i forks a child that keeps serving the selection and inherits our
+# stderr, so capturing stderr through a pipe would block forever. Use a file.
+errfile=$(mktemp -t wayland-spice-clipboard.XXXXXX)
+trap 'rm -f "$errfile"' EXIT
 
 while true; do
     current_clipboard=$(wl-paste --no-newline 2>/dev/null || true)
-    
+
     if [ "$current_clipboard" != "$last_clipboard" ] && [ -n "$current_clipboard" ]; then
-        echo -n "$current_clipboard" | xclip -selection clipboard -i 2>/dev/null
-        echo "Synced: $(echo -n "$current_clipboard" | wc -c) chars"
-        last_clipboard="$current_clipboard"
+        if printf '%s' "$current_clipboard" | xclip -selection clipboard -i 2>"$errfile"; then
+            log "Synced: $(printf '%s' "$current_clipboard" | wc -c) chars"
+            last_clipboard="$current_clipboard"
+            failures=0
+        else
+            failures=$((failures + 1))
+            err=$(tr '\n' ' ' <"$errfile")
+            log "Failed to set X clipboard ($failures/$MAX_SYNC_FAILURES): ${err:-xclip exited non-zero}"
+            if [ "$failures" -ge "$MAX_SYNC_FAILURES" ]; then
+                log "Error: giving up after $failures consecutive failures; exiting for restart"
+                exit 1
+            fi
+        fi
     fi
-    
+
     sleep 1
 done

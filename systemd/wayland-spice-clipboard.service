@@ -1,12 +1,17 @@
 [Unit]
 Description=Wayland to Spice Clipboard Bridge
-After=graphical-session.target
+# Bind to the graphical session so the service starts only after the
+# compositor is up and DISPLAY/WAYLAND_DISPLAY/XAUTHORITY have been
+# imported into the systemd user manager. Starting from default.target
+# runs before that, leaving xclip without X11 credentials.
+PartOf=graphical-session.target
+After=graphical-session.target spice-vdagent.service
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/wayland-spice-clipboard
-Restart=always
+Restart=on-failure
 RestartSec=5
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
