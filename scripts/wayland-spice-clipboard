@@ -59,31 +59,120 @@ if ! wl-paste --list-types >/dev/null 2>&1; then
     log "Warning: cannot reach Wayland display $WAYLAND_DISPLAY yet; will keep polling"
 fi
 
+last_kind=""
 last_clipboard=""
+last_image_hash=""
+last_image_target=""
 failures=0
 
 # xclip -i forks a child that keeps serving the selection and inherits our
 # stderr, so capturing stderr through a pipe would block forever. Use a file.
 errfile=$(mktemp -t wayland-spice-clipboard.XXXXXX)
-trap 'rm -f "$errfile"' EXIT
+imgfile=$(mktemp -t wayland-spice-clipboard.XXXXXX)
+trap 'rm -f "$errfile" "$imgfile"' EXIT
 
-while true; do
+# spice-vdagent maps these X11 targets to SPICE image clipboard types. PNG is
+# first because every image-capable SPICE client supports it. Wayland image/jpg
+# is published as image/jpeg, which is the atom the agent recognizes.
+# Sets wayland_type and x11_target. Returns 0 when an image type is offered.
+pick_image_type() {
+    local types="$1"
+    wayland_type=""
+    x11_target=""
+    if grep -qx 'image/png' <<<"$types"; then
+        wayland_type=image/png
+        x11_target=image/png
+    elif grep -qx 'image/jpeg' <<<"$types"; then
+        wayland_type=image/jpeg
+        x11_target=image/jpeg
+    elif grep -qx 'image/jpg' <<<"$types"; then
+        wayland_type=image/jpg
+        x11_target=image/jpeg
+    elif grep -qx 'image/bmp' <<<"$types"; then
+        wayland_type=image/bmp
+        x11_target=image/bmp
+    elif grep -qx 'image/tiff' <<<"$types"; then
+        wayland_type=image/tiff
+        x11_target=image/tiff
+    else
+        return 1
+    fi
+}
+
+record_xclip_failure() {
+    failures=$((failures + 1))
+    local err
+    err=$(tr '\n' ' ' <"$errfile")
+    log "Failed to set X clipboard ($failures/$MAX_SYNC_FAILURES): ${err:-xclip exited non-zero}"
+    if [ "$failures" -ge "$MAX_SYNC_FAILURES" ]; then
+        log "Error: giving up after $failures consecutive failures; exiting for restart"
+        exit 1
+    fi
+}
+
+# Returns 0 when the image clipboard was handled (published, unchanged, or
+# xclip failed and was recorded). Returns 1 when the bytes were missing or
+# empty so the caller can fall through to text.
+sync_image() {
+    local wayland_type="$1"
+    local x11_target="$2"
+    local hash bytes
+
+    if ! wl-paste --type "$wayland_type" >"$imgfile" 2>/dev/null || [ ! -s "$imgfile" ]; then
+        return 1
+    fi
+
+    hash=$(sha256sum "$imgfile" | awk '{print $1}')
+    if [ "$last_kind" = "image" ] && [ "$hash" = "$last_image_hash" ] && [ "$x11_target" = "$last_image_target" ]; then
+        return 0
+    fi
+
+    if xclip -selection clipboard -t "$x11_target" -i "$imgfile" 2>"$errfile"; then
+        bytes=$(wc -c <"$imgfile" | tr -d ' ')
+        log "Synced image: $x11_target $bytes bytes"
+        last_kind="image"
+        last_image_hash="$hash"
+        last_image_target="$x11_target"
+        failures=0
+    else
+        # Keep last_* so the next poll retries. Do not fall through to text:
+        # that would replace the selection and drop the picture.
+        record_xclip_failure
+        return 0
+    fi
+}
+
+sync_text() {
+    local current_clipboard
     current_clipboard=$(wl-paste --no-newline 2>/dev/null || true)
 
-    if [ "$current_clipboard" != "$last_clipboard" ] && [ -n "$current_clipboard" ]; then
-        if printf '%s' "$current_clipboard" | xclip -selection clipboard -i 2>"$errfile"; then
-            log "Synced: $(printf '%s' "$current_clipboard" | wc -c) chars"
-            last_clipboard="$current_clipboard"
-            failures=0
-        else
-            failures=$((failures + 1))
-            err=$(tr '\n' ' ' <"$errfile")
-            log "Failed to set X clipboard ($failures/$MAX_SYNC_FAILURES): ${err:-xclip exited non-zero}"
-            if [ "$failures" -ge "$MAX_SYNC_FAILURES" ]; then
-                log "Error: giving up after $failures consecutive failures; exiting for restart"
-                exit 1
-            fi
-        fi
+    if [ -z "$current_clipboard" ]; then
+        return
+    fi
+    if [ "$last_kind" = "text" ] && [ "$current_clipboard" = "$last_clipboard" ]; then
+        return
+    fi
+
+    if printf '%s' "$current_clipboard" | xclip -selection clipboard -i 2>"$errfile"; then
+        log "Synced: $(printf '%s' "$current_clipboard" | wc -c) chars"
+        last_kind="text"
+        last_clipboard="$current_clipboard"
+        failures=0
+    else
+        record_xclip_failure
+    fi
+}
+
+while true; do
+    types=$(wl-paste --list-types 2>/dev/null || true)
+
+    # An image offer wins over text. Publishing text would replace the X11
+    # selection and drop the picture. A failed or empty image read falls
+    # through so a stale type list still syncs text.
+    if pick_image_type "$types" && sync_image "$wayland_type" "$x11_target"; then
+        :
+    else
+        sync_text
     fi
 
     sleep 1
