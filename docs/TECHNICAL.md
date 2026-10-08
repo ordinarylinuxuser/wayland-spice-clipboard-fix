@@ -16,8 +16,9 @@ Solution: Bridge process that copies from Wayland to X11 clipboard.
 
 ### Clipboard Sync
 - Poll Wayland clipboard every second
-- Compare with previous content to avoid redundant syncing  
+- Compare with previous content to avoid redundant syncing
 - Forward changes to X11 clipboard
+- When the clipboard offers an image, forward that image (image/png, then jpeg, bmp, or tiff) instead of text. Copying a file in a file manager is not a picture.
 - Log activity for debugging
 
 ### Error Handling

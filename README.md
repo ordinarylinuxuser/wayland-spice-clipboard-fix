@@ -55,7 +55,7 @@ journalctl --user -u wayland-spice-clipboard.service -f
 
 1. Bridge monitors Wayland clipboard with wl-paste
 2. Auto-detects correct X11 display
-3. Forwards clipboard content to X11 via xclip  
+3. Forwards clipboard content to X11 via xclip. An offered image is forwarded as image/png (or jpeg, bmp, or tiff) instead of text.
 4. spice-vdagent reads X11 clipboard and syncs to host
 5. systemd manages the bridge service lifecycle
 
